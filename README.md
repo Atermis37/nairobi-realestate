@@ -25,6 +25,6 @@ Python · Pandas · Scikit-learn · Statsmodels · Playwright · Streamlit
 332 apartments across Kilimani, Westlands, Kileleshwa, Lavington and more.
 Price range: KSh 3M – 43M. Median: KSh 8M.
 
-## Why This Exists
+## Reason For The Project
 Nairobi's property market is opaque. Buyers overpay. Sellers underprice.
 This model brings data into a market that runs on gut feel.
