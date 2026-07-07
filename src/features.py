@@ -1,6 +1,6 @@
-import pandas as pd
-import numpy as np
 from pathlib import Path
+
+import pandas as pd
 
 CLEAN_PATH = Path("data/processed/listings_clean.csv")
 FEATURES_PATH = Path("data/processed/listings_features.csv")
@@ -17,22 +17,36 @@ TIER_MAP = {
     "Other": "Mid",
 }
 
+
 def engineer_features(clean_path=CLEAN_PATH, out_path=FEATURES_PATH):
     df = pd.read_csv(clean_path)
 
-    # Bed-bath ratio
     df["bed_bath_ratio"] = df["bedrooms"] / df["bathrooms"].replace(0, 1)
+    df = df.drop(columns=["bathrooms"])
 
-    # Neighborhood tier
+    # --- Neighborhood tier ---
     df["tier"] = df["location"].map(TIER_MAP)
 
-    # Encode tier as ordinal
-    tier_order = {"Affordable": 1, "Mid": 2, "Premium": 3}
-    df["tier_encoded"] = df["tier"].map(tier_order)
+    tier_dummies = pd.get_dummies(df["tier"], prefix="tier", drop_first=True)
+    assert "tier_Affordable" not in tier_dummies.columns, (
+        "Reference category not dropped as expected"
+    )
+    df = pd.concat([df, tier_dummies.astype(int)], axis=1)
 
     df.to_csv(out_path, index=False)
     print(f"Features saved: {out_path}")
-    print(df[["location", "tier", "tier_encoded", "bed_bath_ratio"]].head(10))
+    print(
+        df[
+            ["location", "tier"]
+            + list(tier_dummies.columns)
+            + ["bedrooms", "bed_bath_ratio"]
+        ].head(10)
+    )
+    print("\nTier counts (flag n<10 as unreliable for coefficient interpretation):")
+    print(df["tier"].value_counts())
+    print("\nLocation counts within tiers (South B n=2 -- treat its effect as noise):")
+    print(df.groupby("tier")["location"].value_counts())
+
 
 if __name__ == "__main__":
     engineer_features()
