@@ -1,23 +1,34 @@
 import asyncio
-from playwright.async_api import async_playwright
-import pandas as pd
-from datetime import datetime
-import random
 import os
+import random
+from datetime import datetime
+
+import pandas as pd
+from playwright.async_api import async_playwright
 
 # CONFIGURATION
 
-BASE_URL = BASE_URL = "https://www.buyrentkenya.com/flats-apartments-for-sale"
+BASE_URL = "https://www.buyrentkenya.com/flats-apartments-for-sale/nairobi?sort=latest"
 OUTPUT_PATH = "data/raw/listings_raw.csv"
-MAX_PAGES = 50
+MAX_PAGES = 150
+# NOTE on BASE_URL:
+#   - /nairobi scopes to BuyRentKenya's Nairobi tag. This is NOT a strict city
+#     boundary (it still includes some Kiambu/Machakos-adjacent listings, e.g.
+#     Kiambu Road, Syokimau) -- so the manual location exclusion list in
+#     cleaner.py is still required as a second layer, not optional.
+#   - ?sort=latest replaces the site's default "Featured" sort. Featured is a
+#     pay-for-placement ranking dominated by a handful of agencies (observed:
+#     Sarabi Listings, SRG Properties, VIVARA REAL ESTATE, Palmora Properties)
+#     who concentrate inventory in Westlands/Kilimani/Kileleshwa/Lavington.
+#     "latest" (chronological) is the closest thing to an unbiased ordering
+#     the site exposes.
 
 # BROWSER SETUP
 
+
 async def create_browser(playwright):
     browser = await playwright.chromium.launch(
-        headless=False,
-        slow_mo=50,
-        channel="chrome"
+        headless=False, slow_mo=50, channel="chrome"
     )
     context = await browser.new_context(
         viewport={"width": 1280, "height": 800},
@@ -25,79 +36,111 @@ async def create_browser(playwright):
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
-        )
+        ),
     )
     return browser, context
 
-# DATA EXTRACTOR
 
-async def extract_card_data(card, page):
+# JS EXTRACTION SCRIPT
+#
+# Runs entirely inside the browser in one synchronous pass over the current
+# DOM snapshot. This avoids the failure mode of grabbing Playwright element
+# handles up front and then querying them one at a time from Python with
+# `await` in between each -- on a Livewire-driven site (confirmed by
+# wire:ignore / wire:snapshot / wire:effects attributes seen in the page),
+# the DOM can be reactively re-rendered between handle acquisition and use,
+# silently invalidating handles for cards processed later in the loop. A
+# single page.evaluate() call reads everything at once, atomically, with no
+# such race possible.
+EXTRACT_ALL_CARDS_JS = """
+() => {
+    const cards = Array.from(document.querySelectorAll('div.listing-card'));
+    return cards.map(card => {
+        let parsed = {};
+        try {
+            const xInit = card.getAttribute('x-init') || '';
+            const match = xInit.match(/JSON\\.parse\\('(.*?)'\\)/);
+            if (match) {
+                parsed = JSON.parse(match[1]);
+            }
+        } catch (e) {
+            parsed = {};
+        }
 
-    data = {}
+        const q = (sel) => {
+            const el = card.querySelector(sel);
+            return el ? el.textContent.trim() : null;
+        };
 
-    async def safe_text(selector, card):
-        try:
-            el = await card.query_selector(selector)
-            if el:
-                return (await el.inner_text()).strip()
-            return None
-        except Exception:
-            return None
+        const title = parsed.item_name
+            || q('h2.font-semibold')
+            || q('[data-cy="user-title"]')
+            || q('h3.capitalize span.text-title');
 
-    async def safe_attr(selector, attr, card):
-        try:
-            el = await card.query_selector(selector)
-            if el:
-                return await el.get_attribute(attr)
-            return None
-        except Exception:
-            return None
+        const priceRaw = parsed.price || parsed.itemPrice || q('[data-cy="card-price"]');
 
-    # Title
-    data['title'] = (
-    await safe_text('h2.font-semibold', card) or
-    await safe_text('[data-cy="user-title"]', card) or
-    await safe_text('h3.capitalize span.text-title', card)
-)
+        const location = parsed.propertyArea
+            || q('p.w-full.truncate.font-normal.capitalize');
 
-    # Price
-    data['price'] = await safe_text('[data-cy="card-price"]', card)
+        let bedrooms = null;
+        if (parsed.item_category3) {
+            const m = String(parsed.item_category3).match(/(\\d+)/);
+            bedrooms = m ? m[1] : null;
+        } else {
+            bedrooms = q('[data-cy="card-bedroom_count"]');
+        }
 
-    # Location
-    data['location'] = await safe_text('p.w-full.truncate.font-normal.capitalize', card)
+        const bathrooms = q('[data-cy="card-bathroom_count"]');
 
-    # Bedrooms
-    data['bedrooms'] = await safe_text('[data-cy="card-bedroom_count"]', card)
+        const linkEl = card.querySelector('a[id*="listing-link"]');
+        let listingUrl = null;
+        if (linkEl) {
+            const href = linkEl.getAttribute('href');
+            listingUrl = href
+                ? (href.startsWith('http') ? href : 'https://www.buyrentkenya.com' + href)
+                : null;
+        }
 
-    # Bathrooms
-    data['bathrooms'] = await safe_text('[data-cy="card-bathroom_count"]', card)
+        return {
+            title: title,
+            price: priceRaw,
+            location: location,
+            bedrooms: bedrooms,
+            bathrooms: bathrooms,
+            listing_url: listingUrl,
+            _has_title: !!title
+        };
+    });
+}
+"""
 
-    # Listing URL
-    href = await safe_attr('a[id*="listing-link"]', 'href', card)
-    if href:
-        data['listing_url'] = "https://www.buyrentkenya.com" + href if not href.startswith('http') else href
-    else:
-        data['listing_url'] = None
 
-    data['scraped_at'] = datetime.now().isoformat()
+async def extract_all_cards(page):
+    """Single atomic extraction pass over every card currently in the DOM."""
+    raw_results = await page.evaluate(EXTRACT_ALL_CARDS_JS)
 
-    if not data.get('title'):
-        return None
+    listings = []
+    failed_count = 0
+    for item in raw_results:
+        if not item.get("_has_title"):
+            failed_count += 1
+            continue
+        item.pop("_has_title", None)
+        item["scraped_at"] = datetime.now().isoformat()
+        listings.append(item)
 
-    return data
+    return listings, failed_count, len(raw_results)
+
 
 # PAGE SCRAPER
 
+
 async def scrape_page(page, page_number):
-    url = BASE_URL if page_number == 1 else f"{BASE_URL}?page={page_number}"
+    url = BASE_URL if page_number == 1 else f"{BASE_URL}&page={page_number}"
     print(f"[Page {page_number}] Loading: {url}")
 
     try:
-        await page.goto(
-            url,
-            timeout=90000,
-            wait_until="domcontentloaded"
-        )
+        await page.goto(url, timeout=90000, wait_until="domcontentloaded")
         if "no longer available" in await page.content():
             print(f"[Page {page_number}] Got 404 page. Stopping.")
             return []
@@ -116,46 +159,45 @@ async def scrape_page(page, page_number):
     for i in range(10):
         await page.evaluate(f"window.scrollTo(0, {i * 500})")
         await asyncio.sleep(0.5)
-
-# Scroll back to top
-        await page.evaluate("window.scrollTo(0, 0)")
-        await asyncio.sleep(1)
+    await page.evaluate("window.scrollTo(0, 0)")
+    await asyncio.sleep(1)
 
     # Debug snapshot
     html = await page.content()
     with open("debug_page.html", "w", encoding="utf-8") as f:
         f.write(html)
-    print("Saved debug_page.html")
 
-    cards = await page.query_selector_all('div.block.flex.flex-col.justify-between.gap-y-3.overflow-hidden')
+    # Single atomic extraction -- see EXTRACT_ALL_CARDS_JS docstring for why
+    # this replaces the previous per-card Python-side query loop.
+    listings, failed_count, total_found = await extract_all_cards(page)
 
-    if not cards:
-        print(f"[Page {page_number}] No listing cards found.")
-        return []
-
-    print(f"[Page {page_number}] Found {len(cards)} listing cards")
-
-    listings = []
-    for card in cards:
-        data = await extract_card_data(card, page)
-        if data:
-            listings.append(data)
-
+    print(f"[Page {page_number}] Found {total_found} listing cards")
+    if failed_count:
+        print(
+            f"[Page {page_number}] {failed_count} card(s) had no title "
+            f"after JS+fallback extraction (genuine template gap, not a "
+            f"staleness artifact -- these are worth inspecting if the count "
+            f"is still high)"
+        )
     print(f"[Page {page_number}] Successfully extracted {len(listings)} listings")
+
     return listings
+
 
 # PAGINATION CHECK
 
+
 async def has_next_page(page, current_page):
     try:
-        # Next page is current_page + 1
-        next_page_url = f"?page={current_page + 1}"
+        next_page_url = f"page={current_page + 1}"
         next_btn = await page.query_selector(f'a[href*="{next_page_url}"]')
         return next_btn is not None
     except Exception:
         return False
 
+
 # MAIN ORCHESTRATOR
+
 
 async def scrape_all_listings(max_pages=MAX_PAGES):
     all_listings = []
@@ -165,7 +207,6 @@ async def scrape_all_listings(max_pages=MAX_PAGES):
         page = await context.new_page()
 
         for page_number in range(1, max_pages + 1):
-
             page_listings = await scrape_page(page, page_number)
             all_listings.extend(page_listings)
 
@@ -190,12 +231,13 @@ async def scrape_all_listings(max_pages=MAX_PAGES):
     df.to_csv(OUTPUT_PATH, index=False)
 
     print(f"\n✓ Saved {len(df)} listings to {OUTPUT_PATH}")
-    print(f"\nFirst 5 rows:")
+    print("\nFirst 5 rows:")
     print(df.head())
     print(f"\nAll columns: {list(df.columns)}")
     print(f"\nMissing values per column:\n{df.isnull().sum()}")
 
     return df
+
 
 # ENTRY POINT
 
