@@ -1,0 +1,7 @@
+-r requirements.txt
+matplotlib
+playwright
+statsmodels
+scipy
+geopy
+plotly

@@ -4,7 +4,8 @@ __pycache__/
 *.pyc
 .env
 data/raw/listings_raw.csv
-models/
+models/*
+!models/rf_model.joblib
 *.pkl
 .ipynb_checkpoints/
 *.html
