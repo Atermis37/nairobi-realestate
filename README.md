@@ -11,7 +11,7 @@ scraped from BuyRentKenya.
 > listed for, not what they sell for. It cannot tell you whether a listing is
 > over- or under-priced relative to the transaction market.
 
-**Live app:** _link added after deployment_
+**Live app:** https://nairobi-apartment-prices.streamlit.app/
 
 ## What This Does
 
