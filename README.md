@@ -12,6 +12,8 @@ scraped from BuyRentKenya.
 > over- or under-priced relative to the transaction market.
 
 **Live app:** https://nairobi-apartment-prices.streamlit.app/
+(hosted on a free tier, so the first load after a period of inactivity can
+take about 30 seconds while the app wakes up)
 
 ## What This Does
 
@@ -30,7 +32,7 @@ Python · Pandas · Scikit-learn · Statsmodels · Playwright · Streamlit · Jo
 - [x] Phase 4: Feature Engineering
 - [x] Phase 5: Modeling & Evaluation (cross-validated, model selected by a pre-committed rule)
 - [x] Phase 6: Model serialization
-- [ ] Phase 7: Streamlit app (built and running locally; deployment in progress)
+- [x] Phase 7: Streamlit app (deployed, see link above)
 
 ## Data Snapshot
 
@@ -200,6 +202,9 @@ comparison was **replaced by cross-validation**:
 | Ridge (CV-tuned) | 0.7325 ± 0.0196 | 0.2974 | 0.2247 |
 | Lasso (CV-tuned) | 0.7325 ± 0.0196 | 0.2974 | 0.2247 |
 
+Random Forest's RMSE is about 8% lower than the linear models'
+(0.2726 vs 0.2974).
+
 **Ridge and Lasso match OLS to four decimals, and that is a real result.**
 With three features and variance inflation factors near 1.0, there is no
 collinearity for Ridge to shrink and no redundant feature for Lasso to drop.
@@ -218,19 +223,24 @@ controlling for bed_bath_ratio):
 | Mid     | 0.63 (+87%)  | 0.39 (+48%)  | 0.34 (+41%)  |
 | Premium | 0.49 (+63%)  | 0.46 (+59%)  | 0.22 (+24%)  |
 
-(The five-bedroom cells have n=3 per tier and are excluded as noise.)
+The jump shrinks steadily in Mid. In Premium it is nearly flat from 1→2 to
+2→3 and only drops at 3→4. (The five-bedroom cells have n=3 per tier and are
+excluded as noise.)
 
 Two checks against the alternative explanation that the effect is a
 `bedrooms × tier` interaction:
 
-- Adding a linear `bedrooms × tier_Premium` term to OLS raised R² only from
-  0.7337 to 0.7347. The term is statistically significant (coef −0.037,
-  p=0.0003) but explains almost none of the gap to Random Forest.
-- Treating bedrooms as categories (and interacting with tier) raised
-  **in-sample** R² to 0.7691, closing roughly 85% of the gap between the
-  linear model (0.7337) and Random Forest's CV R² (0.7751). This is an
-  in-sample figure and is slightly flattering; the cross-validated version
-  is in the next section.
+- Adding a linear `bedrooms × tier_Premium` term to OLS raised in-sample R²
+  only from 0.7337 to 0.7347. The term is statistically significant
+  (coef −0.037, p=0.0003) but explains almost none of the gap to Random
+  Forest.
+- Cross-validated, a categorical OLS (defined in the next section) gains
+  about +0.030 R² over the linear model (0.7628 vs 0.7325; the two figures
+  come from different CV protocols, so treat the difference as approximate).
+  That is roughly 70% of Random Forest's ~0.043 edge. Random Forest adds a
+  further +0.013 over the categorical OLS. What it captures beyond bedroom
+  non-linearity was not tested; non-linearity in `bed_bath_ratio` is the
+  obvious candidate.
 
 ### Model selection: pre-committed decision rule
 
@@ -257,10 +267,11 @@ comparison:
 
 Both criteria were met, so **Random Forest** is the final model.
 
-How to read this: the gain is consistent but small (roughly a 3% lower
-typical error on the log scale: RMSE 0.2726 vs 0.2821 in the earlier
-single-run CV). The 25 splits share training data, so "25/25" is a
-descriptive consistency check, not a statistical significance test.
+How to read this: the gain over the categorical OLS is consistent but small.
+In an earlier single CV run against a categorical OLS without the interaction
+term, RMSE was 0.2726 for Random Forest vs 0.2821 (about 3% lower). The 25
+splits share training data, so "25/25" is a descriptive consistency check,
+not a statistical significance test.
 
 ### Final model and prediction interval
 
@@ -269,21 +280,23 @@ The final Random Forest (300 trees, default depth, seed 42) is fit on all
 
 Random Forest has no built-in prediction interval, so the app reports a
 **90% range** from the 5th and 95th percentiles of out-of-fold residuals on
-the log scale: −0.331 to +0.558, or roughly −28% to +75% around the point
-estimate. The band is asymmetric (the model more often underpredicts
-expensive listings) and **the same width for every input**.
+the log scale (residual = actual − predicted): −0.331 to +0.558, or roughly
+−28% to +75% around the point estimate. The band is asymmetric: the model's
+underpredictions are larger in magnitude than its overpredictions. It is
+also **the same width for every input**.
 
 ### Limitations
 
 - **Asking prices, one portal.** See the note at the top. Results do not
   transfer to sale prices or other sources.
-- **Residual non-normality**, though improved with more data and the tier
-  correction. Skew is 1.34 and kurtosis 5.13 on the full dataset (down from
-  1.87 and 7.86 on the original 332 rows), and the Jarque-Bera test still
-  rejects normality (p≈0). This is attributed to a missing property-quality
-  or finish feature the scraped fields cannot capture.
-- **Mild residual autocorrelation** (Durbin-Watson ≈ 1.14) is consistent with
-  omitted grouping structure: listings in the same building or
+- **Residual diagnostics describe the OLS model, not the shipped Random
+  Forest.** OLS residuals are non-normal, though improved with more data and
+  the tier correction: skew is 1.34 and kurtosis 5.13 on the full dataset
+  (down from 1.87 and 7.86 on the original 332 rows), and the Jarque-Bera
+  test still rejects normality (p≈0). This is attributed to a missing
+  property-quality or finish feature the scraped fields cannot capture.
+- **Mild OLS residual autocorrelation** (Durbin-Watson ≈ 1.14) is consistent
+  with omitted grouping structure: listings in the same building or
   micro-location likely share unexplained variance.
 - **Constant-width prediction interval.** Uncertainty is not modeled as a
   function of the inputs, so the band can be too narrow for listings the
