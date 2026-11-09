@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-LOW_N = 10  # same threshold as features.py's reliability flag
+LOW_N = 10  
 
 st.set_page_config(page_title="Nairobi Apartment Price Estimator", page_icon="🏙️")
 
